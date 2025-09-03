@@ -1,13 +1,13 @@
 package main
 
 import (
-    "encoding/base64"
-    "fmt"
-    "io"
-    "net/http"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"net/http"
 
-    "github.com/google/uuid"
-    "github.com/xaitan80/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/google/uuid"
+	"github.com/xaitan80/learn-file-storage-s3-golang-starter/internal/auth"
 )
 
 func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Request) {
@@ -19,7 +19,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// JWT authentication (already implemented)
+	// JWT authentication
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
@@ -32,7 +32,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// --- Parse the form ---
+	// Parse the form
 	const maxMemory = 10 << 20 // 10MB
 	if err := r.ParseMultipartForm(maxMemory); err != nil {
 		respondWithError(w, http.StatusBadRequest, "Failed to parse form", err)
@@ -60,9 +60,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		mediaType = "application/octet-stream"
 	}
 
-	// --- Get video metadata from database ---
+	// Get video metadata from database
 	video, err := cfg.db.GetVideo(videoID)
-
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "Video not found", err)
 		return
@@ -70,28 +69,24 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	// Check ownership
 	if video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Not the owner of this video", fmt.Errorf("user %s does not own video", userID))
+		respondWithError(w, http.StatusUnauthorized,
+			"Not the owner of this video",
+			fmt.Errorf("user %s does not own video", userID))
 		return
 	}
 
-    // --- Encode thumbnail to base64 and build a data URL ---
-    // Convert raw file bytes to a base64 string. This avoids storing binary data directly
-    // and allows the client to display the image without making a separate request.
-    encoded := base64.StdEncoding.EncodeToString(data)
-    dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, encoded)
+	// Encode as base64 data URL
+	encoded := base64.StdEncoding.EncodeToString(data)
+	url := fmt.Sprintf("data:%s;base64,%s", mediaType, encoded)
+	video.ThumbnailURL = &url
 
-    // Update video metadata with the data URL. The database schema includes a
-    // `thumbnail_url` column that should contain the full data URI. Because the field
-    // is a pointer in the Video struct, take its address here.
-    video.ThumbnailURL = &dataURL
+	// Update record in database
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to update video", err)
+		return
+	}
 
-    // Update the record in the database with the new ThumbnailURL
-    err = cfg.db.UpdateVideo(video)
-    if err != nil {
-        respondWithError(w, http.StatusInternalServerError, "Failed to update video", err)
-        return
-    }
-
-    // Respond with updated video JSON
-    respondWithJSON(w, http.StatusOK, video)
+	// Respond with updated video JSON
+	respondWithJSON(w, http.StatusOK, video)
 }
