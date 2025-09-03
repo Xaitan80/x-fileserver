@@ -7,7 +7,7 @@ import (
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/xaitan80/learn-file-storage-s3-golang-starter/internal/database"
+	"github.com/xaitan80/x-fileserver/internal/database"
 )
 
 type apiConfig struct {

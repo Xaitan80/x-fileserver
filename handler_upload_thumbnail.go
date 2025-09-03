@@ -3,12 +3,13 @@ package main
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/google/uuid"
-	"github.com/xaitan80/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/xaitan80/x-fileserver/internal/auth"
 )
 
 func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Request) {
@@ -58,16 +59,26 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Parse and validate media type
+	contentType := fileHeader.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
+		return
+	}
+
+	if mediaType != "image/png" && mediaType != "image/jpeg" {
+		respondWithError(w, http.StatusBadRequest, "Unsupported thumbnail type", nil)
+		return
+	}
+
 	// Determine file extension
-	mediaType := fileHeader.Header.Get("Content-Type")
 	var ext string
 	switch mediaType {
 	case "image/png":
 		ext = ".png"
 	case "image/jpeg":
 		ext = ".jpg"
-	default:
-		ext = ".bin"
 	}
 
 	// Build file path in assets dir
