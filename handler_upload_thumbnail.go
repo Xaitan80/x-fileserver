@@ -1,12 +1,13 @@
 package main
 
 import (
-	"fmt"
-	"io"
-	"net/http"
+    "encoding/base64"
+    "fmt"
+    "io"
+    "net/http"
 
-	"github.com/google/uuid"
-	"github.com/xaitan80/learn-file-storage-s3-golang-starter/internal/auth"
+    "github.com/google/uuid"
+    "github.com/xaitan80/learn-file-storage-s3-golang-starter/internal/auth"
 )
 
 func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Request) {
@@ -73,23 +74,24 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// --- Save thumbnail to global map ---
-	videoThumbnails[videoID] = thumbnail{
-		data:      data,
-		mediaType: mediaType,
-	}
+    // --- Encode thumbnail to base64 and build a data URL ---
+    // Convert raw file bytes to a base64 string. This avoids storing binary data directly
+    // and allows the client to display the image without making a separate request.
+    encoded := base64.StdEncoding.EncodeToString(data)
+    dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, encoded)
 
-	// Update video metadata with thumbnail URL
-	url := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID)
-	video.ThumbnailURL = &url
+    // Update video metadata with the data URL. The database schema includes a
+    // `thumbnail_url` column that should contain the full data URI. Because the field
+    // is a pointer in the Video struct, take its address here.
+    video.ThumbnailURL = &dataURL
 
-	// Update record in database
-	err = cfg.db.UpdateVideo(video)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to update video", err)
-		return
-	}
+    // Update the record in the database with the new ThumbnailURL
+    err = cfg.db.UpdateVideo(video)
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Failed to update video", err)
+        return
+    }
 
-	// Respond with updated video JSON
-	respondWithJSON(w, http.StatusOK, video)
+    // Respond with updated video JSON
+    respondWithJSON(w, http.StatusOK, video)
 }
