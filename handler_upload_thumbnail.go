@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +19,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// JWT authentication (already implemented)
+	// JWT authentication
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
@@ -31,7 +32,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// --- Parse the form ---
+	// Parse the form
 	const maxMemory = 10 << 20 // 10MB
 	if err := r.ParseMultipartForm(maxMemory); err != nil {
 		respondWithError(w, http.StatusBadRequest, "Failed to parse form", err)
@@ -59,9 +60,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		mediaType = "application/octet-stream"
 	}
 
-	// --- Get video metadata from database ---
+	// Get video metadata from database
 	video, err := cfg.db.GetVideo(videoID)
-
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "Video not found", err)
 		return
@@ -69,18 +69,15 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	// Check ownership
 	if video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Not the owner of this video", fmt.Errorf("user %s does not own video", userID))
+		respondWithError(w, http.StatusUnauthorized,
+			"Not the owner of this video",
+			fmt.Errorf("user %s does not own video", userID))
 		return
 	}
 
-	// --- Save thumbnail to global map ---
-	videoThumbnails[videoID] = thumbnail{
-		data:      data,
-		mediaType: mediaType,
-	}
-
-	// Update video metadata with thumbnail URL
-	url := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID)
+	// Encode as base64 data URL
+	encoded := base64.StdEncoding.EncodeToString(data)
+	url := fmt.Sprintf("data:%s;base64,%s", mediaType, encoded)
 	video.ThumbnailURL = &url
 
 	// Update record in database
