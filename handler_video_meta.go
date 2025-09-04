@@ -39,7 +39,6 @@ func (cfg *apiConfig) handlerVideosCreate(w http.ResponseWriter, r *http.Request
 		Title:       params.Title,
 		Description: params.Description,
 	})
-
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create video", err)
 		return
@@ -48,7 +47,7 @@ func (cfg *apiConfig) handlerVideosCreate(w http.ResponseWriter, r *http.Request
 	respondWithJSON(w, http.StatusCreated, video)
 }
 
-// Get a single video by ID
+// Get a single video by ID (now returns stored CloudFront URL as-is)
 func (cfg *apiConfig) handlerVideoGet(w http.ResponseWriter, r *http.Request) {
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
@@ -63,17 +62,10 @@ func (cfg *apiConfig) handlerVideoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 🔑 convert DB video to signed URL before sending to client
-	signedVideo, err := cfg.dbVideoToSignedVideo(video)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to sign video URL", err)
-		return
-	}
-
-	respondWithJSON(w, http.StatusOK, signedVideo)
+	respondWithJSON(w, http.StatusOK, video)
 }
 
-// Get all videos for the authenticated user
+// Get all videos for the authenticated user (returns stored CloudFront URLs)
 func (cfg *apiConfig) handlerVideosRetrieve(w http.ResponseWriter, r *http.Request) {
 	// Authenticate user
 	token, err := auth.GetBearerToken(r.Header)
@@ -94,18 +86,7 @@ func (cfg *apiConfig) handlerVideosRetrieve(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Sign URLs
-	signedVideos := make([]database.Video, 0, len(videos))
-	for _, v := range videos {
-		signedVideo, err := cfg.dbVideoToSignedVideo(v)
-		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Failed to sign video URL", err)
-			return
-		}
-		signedVideos = append(signedVideos, signedVideo)
-	}
-
-	respondWithJSON(w, http.StatusOK, signedVideos)
+	respondWithJSON(w, http.StatusOK, videos)
 }
 
 // Delete a video by ID
@@ -130,7 +111,7 @@ func (cfg *apiConfig) handlerVideoDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Fetch the video to check ownership
+	// Check ownership
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "Video not found", err)
@@ -141,7 +122,7 @@ func (cfg *apiConfig) handlerVideoDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Delete it
+	// Delete
 	if err := cfg.db.DeleteVideo(videoID); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to delete video", err)
 		return

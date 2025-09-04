@@ -13,13 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"github.com/xaitan80/x-fileserver/internal/auth"
-	"github.com/xaitan80/x-fileserver/internal/database"
 )
 
 type ffprobeOutput struct {
@@ -69,11 +66,11 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	return "other", nil
 }
 
-// processVideoForFastStart tries remux, falls back to re-encode
+// processVideoForFastStart tries remux first (dropping data streams), then re-encode if needed
 func processVideoForFastStart(filePath string) (string, error) {
 	outputPath := filePath + ".faststart.mp4"
 
-	// Attempt remux (copy video/audio, drop data streams)
+	// Attempt 1: remux (copy video/audio, drop data streams like tmcd)
 	cmd := exec.Command(
 		"ffmpeg",
 		"-i", filePath,
@@ -93,7 +90,7 @@ func processVideoForFastStart(filePath string) (string, error) {
 		fmt.Printf("ffmpeg remux failed, retrying with re-encode: %s\n", stderr.String())
 	}
 
-	// Fallback: re-encode
+	// Fallback: re-encode (square pixels), copy audio
 	outputPathReencode := filePath + ".reencode.mp4"
 	cmd = exec.Command(
 		"ffmpeg",
@@ -113,44 +110,6 @@ func processVideoForFastStart(filePath string) (string, error) {
 	}
 
 	return outputPathReencode, nil
-}
-
-// generatePresignedURL builds a temporary signed URL for S3
-func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
-	presigner := s3.NewPresignClient(s3Client)
-
-	req, err := presigner.PresignGetObject(context.Background(), &s3.GetObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	}, func(opts *s3.PresignOptions) {
-		opts.Expires = expireTime
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to presign: %w", err)
-	}
-
-	return req.URL, nil
-}
-
-// dbVideoToSignedVideo converts DB video record into one with presigned URL
-func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
-	if video.VideoURL == nil || *video.VideoURL == "" {
-		return video, nil
-	}
-
-	parts := strings.SplitN(*video.VideoURL, ",", 2)
-	if len(parts) != 2 {
-		return video, fmt.Errorf("invalid video_url format")
-	}
-	bucket, key := parts[0], parts[1]
-
-	url, err := generatePresignedURL(cfg.s3Client, bucket, key, 15*time.Minute)
-	if err != nil {
-		return video, err
-	}
-
-	video.VideoURL = &url
-	return video, nil
 }
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
@@ -225,13 +184,10 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
-	_, err = io.Copy(tempFile, file)
-	if err != nil {
+	if _, err = io.Copy(tempFile, file); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to save temp file", err)
 		return
 	}
-
-	fmt.Println("Saved upload to temp file:", tempFile.Name())
 
 	// Process video for fast start
 	processedPath, err := processVideoForFastStart(tempFile.Name())
@@ -248,7 +204,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 	defer processedFile.Close()
 
-	// Determine aspect ratio
+	// Determine aspect ratio (for folder prefix)
 	aspect, err := getVideoAspectRatio(processedPath)
 	if err != nil {
 		aspect = "other"
@@ -266,8 +222,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	// Generate random filename
 	randomBytes := make([]byte, 32)
-	_, err = rand.Read(randomBytes)
-	if err != nil {
+	if _, err = rand.Read(randomBytes); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to generate random key", err)
 		return
 	}
@@ -286,21 +241,16 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Update DB with bucket,key instead of URL
-	stored := fmt.Sprintf("%s,%s", cfg.s3Bucket, key)
-	video.VideoURL = &stored
-	err = cfg.db.UpdateVideo(video)
-	if err != nil {
+	// Store a CloudFront URL (not presigned, not bucket,key)
+	// Expect cfg.s3CfDistribution to be something like: dxxxxxxx.cloudfront.net
+	cfURL := fmt.Sprintf("https://%s/%s", cfg.s3CfDistribution, key)
+	video.VideoURL = &cfURL
+
+	if err := cfg.db.UpdateVideo(video); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to update video record", err)
 		return
 	}
 
-	// Return with presigned URL
-	signedVideo, err := cfg.dbVideoToSignedVideo(video)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to generate presigned URL", err)
-		return
-	}
-
-	respondWithJSON(w, http.StatusOK, signedVideo)
+	// Return the DB record as-is (no signing needed anymore)
+	respondWithJSON(w, http.StatusOK, video)
 }
