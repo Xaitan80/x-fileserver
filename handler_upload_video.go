@@ -1,20 +1,73 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"github.com/xaitan80/x-fileserver/internal/auth"
 )
+
+type ffprobeOutput struct {
+	Streams []struct {
+		Width  int `json:"width"`
+		Height int `json:"height"`
+	} `json:"streams"`
+}
+
+// getVideoAspectRatio runs ffprobe on a local file and returns "16:9", "9:16", or "other"
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-print_format", "json",
+		"-show_streams",
+		filePath,
+	)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffprobe failed: %w", err)
+	}
+
+	var probe ffprobeOutput
+	if err := json.Unmarshal(out.Bytes(), &probe); err != nil {
+		return "", fmt.Errorf("unmarshal failed: %w", err)
+	}
+
+	if len(probe.Streams) == 0 {
+		return "other", nil
+	}
+
+	width := probe.Streams[0].Width
+	height := probe.Streams[0].Height
+	if width == 0 || height == 0 {
+		return "other", nil
+	}
+
+	// ratio-based check with tolerance
+	ratio := float64(width) / float64(height)
+
+	if ratio > 1.7 && ratio < 1.8 {
+		return "16:9", nil
+	} else if ratio > 0.55 && ratio < 0.6 {
+		return "9:16", nil
+	}
+	return "other", nil
+
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Limit upload size to 1 GB
@@ -101,6 +154,23 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Determine aspect ratio
+	aspect, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		// non-fatal, fall back to "other"
+		aspect = "other"
+	}
+
+	var prefix string
+	switch aspect {
+	case "16:9":
+		prefix = "landscape/"
+	case "9:16":
+		prefix = "portrait/"
+	default:
+		prefix = "other/"
+	}
+
 	// Generate random filename
 	randomBytes := make([]byte, 32)
 	_, err = rand.Read(randomBytes)
@@ -109,7 +179,14 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	randomName := base64.RawURLEncoding.EncodeToString(randomBytes)
-	key := randomName + filepath.Ext(fileHeader.Filename)
+	key := prefix + randomName + filepath.Ext(fileHeader.Filename)
+
+	// Reset pointer again before upload
+	_, err = tempFile.Seek(0, io.SeekStart)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to reset file pointer before upload", err)
+		return
+	}
 
 	// Upload to S3
 	_, err = cfg.s3Client.PutObject(context.Background(), &s3.PutObjectInput{
