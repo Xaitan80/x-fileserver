@@ -68,6 +68,25 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	return "other", nil
 
 }
+func processVideoForFastStart(filePath string) (string, error) {
+	// output path = input + ".processing"
+	outputPath := filePath + ".processing"
+
+	cmd := exec.Command(
+		"ffmpeg",
+		"-i", filePath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		"-f", "mp4",
+		outputPath,
+	)
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffmpeg faststart failed: %w", err)
+	}
+
+	return outputPath, nil
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Limit upload size to 1 GB
@@ -147,17 +166,24 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Reset pointer
-	_, err = tempFile.Seek(0, io.SeekStart)
+	// Process video for fast start
+	processedPath, err := processVideoForFastStart(tempFile.Name())
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to reset temp file pointer", err)
+		respondWithError(w, http.StatusInternalServerError, "Failed to process video for fast start", err)
 		return
 	}
+	defer os.Remove(processedPath)
 
-	// Determine aspect ratio
-	aspect, err := getVideoAspectRatio(tempFile.Name())
+	processedFile, err := os.Open(processedPath)
 	if err != nil {
-		// non-fatal, fall back to "other"
+		respondWithError(w, http.StatusInternalServerError, "Failed to open processed file", err)
+		return
+	}
+	defer processedFile.Close()
+
+	// Determine aspect ratio on processed file
+	aspect, err := getVideoAspectRatio(processedPath)
+	if err != nil {
 		aspect = "other"
 	}
 
@@ -181,18 +207,11 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	randomName := base64.RawURLEncoding.EncodeToString(randomBytes)
 	key := prefix + randomName + filepath.Ext(fileHeader.Filename)
 
-	// Reset pointer again before upload
-	_, err = tempFile.Seek(0, io.SeekStart)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to reset file pointer before upload", err)
-		return
-	}
-
-	// Upload to S3
+	// Upload to S3 (only once, with processed file)
 	_, err = cfg.s3Client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &key,
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: &mediaType,
 	})
 	if err != nil {
